@@ -1,16 +1,16 @@
-# Keepsake
+# Notch
 
 **What should a robot remember?**
 
-Keepsake tests whether a world model's own surprise is a good guide.
+Notch compares the signals that could decide what a world-model planner writes into a small, fixed memory. One of them is new: whether an observation changed the plan.
 
-Paper working title: *What Should a Robot Remember? Surprise as a Guide to Lean Memory in Real-Time World-Model Planning*
+Paper working title: *What Should a Robot Remember? Plan Change as a Write Signal for Lean Memory in World-Model Planning*
 
 | | |
 |---|---|
-| Status | Step 01 in progress. Project started 27 Oct 2026. Revised 27 Oct 2026 (surprise treated as a hypothesis, not a definition; two claims kept separate). |
+| Status | Step 01 in progress |
 | Author | Vinod Anbalagan |
-| Target | Complete preprint on arXiv by end of December 2026; real-robot demo in early 2027 |
+| Target | Preprint on arXiv, simulation demos, then a real-arm demo |
 | Progress | Tracked step by step on the [Lab page](https://vinodanbalagan.vercel.app/lab) |
 | Convention | Anything marked `[TBD: ...]` is unconfirmed. It is a placeholder, not a value. |
 
@@ -18,58 +18,68 @@ Paper working title: *What Should a Robot Remember? Surprise as a Guide to Lean 
 
 ## 1. The idea in one paragraph
 
-Most state-of-the-art robot foundation models have no memory. They act on the current camera frame only, which works for short or repetitive tasks but fails on long tasks where the scene does not show how far along you are (Finn, YC talk, 2026). Memory is expensive when done naively: 10 seconds of video from four cameras at 50 Hz is about half a million tokens, and even 1 frame per second is about 10,000 tokens (same talk). Physical Intelligence's answer, MEM, uses compressed video for short-term memory and LLM-written text summaries for long-term memory (Torne et al., 2026).
+A robot that acts only on its current camera frame fails as soon as the frame stops showing what it needs: an object that is now hidden, a cue that has disappeared. Many ways of adding memory to robot policies now exist, from compressed video and language summaries to learned gates and memory slots (Section 3). Memory always has a price, and inside a sampling-based planner the price is multiplied: the world model reads its memory at every step of every imagined rollout, so the cost scales with the number of samples times the planning horizon. For a planner, keeping memory small matters more than for a policy.
 
-**Our question:** is a world model's own surprise an effective way to decide what goes into a small, fixed memory, so that a fast latent world-model planner stays reliable on tasks where the current frame does not reveal what to do next?
+A small memory forces a choice: **what gets written?** Notch studies that choice directly. On one trained world model, with one fixed memory budget, it compares the signals that could trigger a write:
 
-**Our candidate mechanism:** the planner runs memoryless by default (fast, "Type 1"). It writes to a small, fixed-size memory when its own action-conditioned prediction of the next state is wrong, and reads that memory when planning (slower, "Type 2"). No video buffer, no LLM, constant memory size, constant cost.
+1. **Time:** write at fixed intervals.
+2. **Chance:** write at random.
+3. **Surprise:** write when the world model's own prediction of the next state was wrong.
+4. **Plan change (new):** write when the new observation made the planner change its plan.
+5. **Surprise × plan change:** surprise weighted by whether it mattered.
 
-**What we do not assume:** that surprise equals importance. A visually unexpected but irrelevant change can produce a large prediction error. A familiar-looking moment that marks real task progress can produce almost none. Whether surprise is a good proxy for what is worth remembering is something this project tests, not something it takes for granted.
+**Why plan change.** A planner re-plans at every step, so it can check directly whether what it just saw changed what it intends to do. A policy has no plan to compare. A moving distractor is surprising but leaves the plan untouched; an object that is not where it should be changes the plan. Plan change is measured from the planner itself, with no labels, no extra network and no language model.
+
+**What we do not assume:** that any of these signals equals importance. Each is a hypothesis. Section 2 states, for each kind of event, what each signal is expected to catch and miss, and the Signal Audit (Step 03) measures it before any memory system is built.
 
 ---
 
 ## 2. Research question and claims
 
-**RQ.** Is surprise from an action-conditioned world model an effective way to allocate a limited memory budget for reliable, low-latency planning?
+**RQ.** Inside a sampling-based latent world-model planner, which signal should decide what is written into a small, fixed memory, and what does that memory cost in planning time?
 
-The project makes two separate claims, which can come out differently and are reported separately throughout. Success on one must never be presented as success on the other.
+The claims are separate and are reported separately. Success on one is never presented as success on another.
 
 | ID | Claim | Tested by | What would falsify it |
 |---|---|---|---|
-| H1 | A memoryless latent world-model planner fails on our memory-requiring tasks. | No-memory baseline vs oracle | It succeeds anyway, meaning the tasks do not need memory (redesign the tasks) |
-| H2 | **Efficiency.** A compact, fixed-size memory recovers most of the reliability of full history at a fraction of the planning cost, whatever rule decides what is written. | Compact memory with fixed or random writes vs full history vs recurrent state | Compact memory is clearly worse than full history at every budget, or no faster |
-| H3 | **Selection.** At the same memory budget, writing on the world model's own surprise beats writing at fixed intervals or at random. | Surprise vs fixed vs random writes, same K | Fixed or random writes do as well |
-| H4 | **Event types.** Surprise catches unexpected outside changes, misses self-caused progress, and fires on irrelevant novelty. | The Surprise Audit (Step 02), per event type | Surprise behaves the same across all three event types |
+| H1 | **The tasks need memory.** A memoryless planner fails on them and an oracle given the hidden state succeeds. | No-memory baseline vs oracle | The memoryless planner succeeds anyway (redesign the tasks) |
+| H2 | **Efficiency.** A compact, fixed-size memory recovers most of the reliability of full history, and its planning-time advantage grows with episode length. | Compact memory vs full history vs recurrent state, across episode lengths | Compact memory is clearly less reliable at every budget, or there is no speed gap at any tested length |
+| H3 | **Selection matters.** At the same write budget, a signal-based write rule beats writing by time or by chance. | Surprise and plan change vs periodic and random writes, same budget, same model weights | Periodic or random writes do as well |
+| H4 | **Plan change.** Plan change, alone or combined with surprise, beats surprise alone, mainly by ignoring changes that do not matter. | Rules 3, 4 and 5 compared, including on distractor and appearance-change variants | Plan change is no better than surprise, including when distractors are present |
+| H5 | **Limits.** Each signal catches and misses different kinds of events. | The Signal Audit, per event type | Every signal behaves the same across event types |
 
-**Event types (the core of the analysis):**
+**Event types and what each signal is expected to do:**
 
-| Event type | Example | Expected surprise behaviour |
-|---|---|---|
-| Unexpected outside change | A box moved by something else; a cue whose identity cannot be predicted | Fires (good) |
-| Self-caused progress | "I just finished box 3" | Probably silent, because the robot caused it (miss) |
-| Irrelevant novelty | A flicker or a moving distractor | Fires (false alarm, the "noisy TV" problem from the curiosity literature) |
+| Event type | Example | Surprise | Plan change |
+|---|---|---|---|
+| Outside change that matters | The object is revealed, or moved by something else | Fires | Fires |
+| Irrelevant novelty | A distractor moves or flickers | Fires (false alarm) | Silent |
+| Appearance-only change | Recolouring, lighting | May fire: latent prediction error is known to respond to appearance (Hristov et al., 2026) | Silent |
+| Self-caused progress | "I just finished item 3" | Silent, because the robot caused it | Probably silent: the plan advances as expected |
 
-If H4 holds as expected, the natural method extension is a second write trigger for self-caused task progress, alongside surprise. That extension is only added if Step 02 shows the miss.
-
-**The first decisive question (Step 02):** after training, the model has learned when cues appear and disappear. Does surprise still fire for the cue? Our expectation: it fires for the cue's *identity* (which goal it shows), which the model cannot predict, not for its *appearance*, which it can. If the gate misses the cue entirely, that is the precise limitation the paper must address, not a reason to abandon the direction.
+Self-caused progress is the expected blind spot of both signals. If the audit confirms it, the paper reports it as a limit and tests a separate progress trigger as an extension `[TBD: decided after Step 03]`.
 
 ---
 
-## 3. Why this is a gap: prior work and positioning
+## 3. Prior work and positioning
 
-| Work | Memory | Memory used for | Speed reported | How we differ |
-|---|---|---|---|---|
-| **MEM** (Torne et al., 2026, Physical Intelligence) | Compressed video (short-term) plus LLM-written text summary (long-term) | VLA control, tasks up to 15 min | Not the focus | No video, no LLM; a world-model planner, not a VLA |
-| **Worth Remembering** (Gorlo, Wise, Speranzon, Carlone, 2026, MIT and Lockheed Martin) | Surprise-gated episodes (8 frames each), surprise from a Gaussian fit over V-JEPA-2 features | Question answering by an LLM agent | **No** latency reported | Surprise from the planner's *own action-conditioned* prediction error (they list an action-conditioned predictor as future work); memory used for **control**; speed is a primary metric; surprise is tested as a proxy, not assumed |
-| **Mem-World** (Zheng et al., 2026) | 4D surfel memory of wrist views | Video world model for policy evaluation and data generation, not planning | No latency in main text; trained ~2 days on 8 H100s | Lean latent memory, used inside a planner |
-| **ERA** (Fan, Zhang, Han, 2026) | Case bank of (event code, maneuver, reliability) | Retrieval controller for UAV navigation; ~130 Hz on Jetson Orin Nano | Yes | Events are hand-defined (distance threshold); ours are triggered by learned surprise |
-| **EV-WM** (Wang et al., 2026) | No dedicated memory module | Verifying imagined plans via structured event states | No | Complementary: verification, not memory |
-| **LeWorldModel** (Maes, Le Lidec, Scieur, LeCun, Balestriero, 2026) | None | Latent planning from pixels; ~15M params; trains on one GPU in a few hours; planning up to 48x faster than DINO-WM | Yes | **Our base model.** Its benchmark tasks do not require memory |
-| **Fast-LeWM** (Gao, Xu, 2026) | None | Parallel latent rollout; ~2.1x faster CEM solve than LeWM | Yes | Possible faster base; code is open |
+| Work | What it does | How Notch differs |
+|---|---|---|
+| **MEM** (Torne et al., 2026, Physical Intelligence) | Compressed video plus language summaries as memory for a VLA | A compact world-model planner; no video buffer, no language model |
+| **Worth Remembering** (Gorlo, Wise, Speranzon, Carlone, 2026) | Surprise-gated episodic memory, used by a language-model agent to answer questions; no timing | Memory inside the control loop; surprise is one candidate among several; planning time is a primary result |
+| **AURA-Mem** (Chen, 2026) | Surprise-informed learned write gate with constant memory, wrapped around a VLA; compares against budget-matched random and periodic writes | A planner, not a policy; relevance is measured from the plan, not learned; tasks require memory |
+| **Gated Memory Policy** (Gao, Liu, Li, Song, 2026) | A learned gate that decides when a diffusion policy reads its history | Studies what is written, not when to read; planner setting |
+| **MemWM** (Sun, Zhu, 2026) | Always-on learned memory slots added to LeWorldModel, on LeWM's original tasks | Tasks that need memory; an explicit write rule; planning time reported. Used as a baseline |
+| **MemoWM** (Zeng et al., 2026) | Stores only what a world model cannot recover and what matters for future tasks; argues surprise alone is not enough; web-agent question answering, measured in storage | Closed-loop control; relevance comes from the planner online, not from offline estimates |
+| **HiMem-WAM**, **Memory as Plans** (2026) | Memory gated on skill or segment boundaries in multi-billion-parameter world-action models | About 15M parameters; no segment labels |
+| **Hristov, Slavov, Vasilev** (2026) | Shows latent prediction error in video world models is confounded by appearance, repetition and motion | Their controls are built into our Signal Audit |
+| **Counterfactual Memory Audit** (Zhang, Xiang, Chen, 2026) | Shows that memory changing an action does not prove memory guided it | Their test is part of our evidence (Section 5.4) |
+| **GateL0RD** (Gumbsch, Butz, Martius, 2021) | A recurrent latent state trained to update sparsely, for prediction and planning under partial observability | Used as a baseline style: learned sparse updates vs explicit write rules |
+| **LeWorldModel** (Maes, Le Lidec, Scieur, LeCun, Balestriero, 2026) | Compact JEPA world model that plans from pixels | Our base model. Its benchmark tasks do not require memory |
 
-**Positioning sentence (draft):** *Prior work gates memory on surprise for offline question answering, or adds heavy memory to video world models for evaluation. We test whether an action-conditioned world model's own surprise is a good way to fill a constant-size memory inside a real-time planner, separate the value of compact memory from the value of surprise-based selection, and measure the trade-off between reliability and planning speed directly.*
+Further background to verify before citing `[TBD: verify each citation]`: Schmidhuber's history compression (1992, store only what a predictor fails to predict), Titans (Behrouz et al., 2025, surprise-driven memory writes at test time), EM-LLM (Fountas et al., 2024, surprise-based event segmentation), and event segmentation theory in cognitive science (Zacks et al.).
 
-Also relevant: **The Planning Limits of Latent World Models** (Alrasheed, Azam, Akhtar, 2026) finds a world model guides action selection reliably only when the goal lies within or slightly beyond its imagined trajectory. Long memory tasks will need subgoals or a short planning horizon. See Risks.
+**Positioning sentence (draft):** *Memory is being added to robot policies and world models in many ways, but the rule that decides what is written is usually fixed, learned end to end, or borrowed from surprise. We compare write signals on equal terms inside a sampling-based latent planner, introduce plan change as a signal a planner can measure about itself, and report reliability and planning time together.*
 
 ---
 
@@ -80,135 +90,190 @@ frame o_t ──► encoder ──► z_t ──┐
                                  ├──► predictor(z, a, memory) ──► ẑ_{t+1}
 memory M (K slots) ─────────────┘
                                          │
-planner (CEM / MPPI) ◄── cost uses M ────┘
+planner (sampling-based MPC) ◄───────────┘
 
-surprise s_t = || ẑ_t − z_t ||   (prediction made one step ago vs what actually happened)
-if s_t > threshold  →  write z_t (plus small context) into M
+surprise     s_t = distance( ẑ_t , z_t )                   prediction made one step ago vs what happened
+plan change  c_t = distance( plan before o_t , plan after o_t )
+write rule:  time | chance | s_t | c_t | s_t × c_t         same budget for all
 ```
 
-1. **Encoder:** LeWM's encoder (ViT-Tiny, ~5M params), trained end to end as in LeWM.
-2. **Predictor:** LeWM's action-conditioned predictor, extended to cross-attend to the memory slots.
-3. **Event memory:** K fixed slots `[TBD: K, start with 4 to 16]`. Eviction rule `[TBD: FIFO vs lowest surprise]`.
-4. **Write rule (the variable under test):** surprise (the world model's own one-step prediction error, with an adaptive threshold), fixed interval, or random, all at the same budget. For the surprise threshold we start from the robust median-plus-MAD style threshold used by Gorlo et al. and add habituation, because they report that recurring surprising subjects keep triggering writes.
-5. **Progress trigger (conditional):** a second write trigger for self-caused task progress, added only if Step 02 shows surprise misses it.
-
-**Type 1 / Type 2 reading:** most steps never touch memory beyond a cheap attention read over a few slots. Memory is written only at selected moments, so it stays small and does not bloat.
+1. **Encoder and predictor:** LeWorldModel's, with the predictor extended to read K memory slots.
+2. **Memory:** K fixed slots holding past latents `[TBD: K, start with 4 to 16]`. One eviction rule, shared by all write rules `[TBD]`.
+3. **One model, many write rules.** The plan is to train the predictor with memory slots filled by random subsets of earlier latents from the same episode, so it learns to use whatever the memory holds. Every write rule is then evaluated on the same weights, which removes training as a confound `[TBD: confirm this training scheme works, Step 04]`.
+4. **Plan change.** The planner already holds the plan it made one step ago. Plan change compares that plan with the one made after the new observation `[TBD: exact measure, action distance or cost difference; confirm the planner exposes both plans, Step 01]`. Sampling-based planners are noisy, so the measure must separate real plan changes from sampling noise (see Risks).
+5. **Budget matching.** All write rules write the same average number of times per episode.
 
 ---
 
 ## 5. Experiments
 
-### 5.1 Tasks (memory-requiring variants of LeWM's environments)
+### 5.1 Tasks
 
-LeWM evaluates on Push-T, OGBench-Cube, Two-Room and Reacher, none of which need memory. We modify them so that the current frame does not reveal what to do next. Each task is chosen to produce one event type from Section 2.
+LeWorldModel plans toward a goal image, so the tasks are hidden-state tasks: the outcome of an action depends on something that is no longer visible.
 
-| ID | Task | Why the current frame is not enough | Event type it tests |
-|---|---|---|---|
-| T1 | **Transient cue** (Two-Room): a goal cue is visible only for the first steps, then disappears | The agent must remember which goal was shown | Unexpected outside change (cue identity) |
-| T2 | **Identical items** (OGBench-Cube style): push each of N identical cubes to a zone exactly once | Processed and unprocessed cubes look the same | Self-caused progress |
-| T3 | **Consequential perturbation**: an object the task depends on is displaced mid-task | Memory must be *updated* | Unexpected outside change |
-| T4 | **Distractor**: an irrelevant object moves or flickers during T1 or T3 | Tests false alarms | Irrelevant novelty |
-| C | **Original LeWM tasks** (control) | Checks that memory does not hurt tasks that do not need it | None |
-
-First implementation: T1 and T3 only, plus control. T2 and T4 are added in Step 02 for the audit, and kept if the audit says they matter. `[TBD: final task list after Step 02]`
+| Group | Tasks | Purpose |
+|---|---|---|
+| Diagnostic | A Two-Room variant in which information needed to reach the goal is visible only early in the episode `[TBD: exact design]` | Cheap, fully controlled, ground-truth state for the audit |
+| Benchmark | Two or three tasks from MIKASA-Robo (Cherepanov et al.), candidates: ShellGame, RememberColor, TakeItBack `[TBD: confirm they fit goal-image planning and that LeWorldModel trains on their data, Step 01]` | Standard, externally defined memory tasks |
+| Variants | Each task with a distractor, and with appearance-only changes | False alarms (H4) |
+| Control | Original LeWorldModel tasks | Memory must not hurt tasks that do not need it |
 
 ### 5.2 Baselines
 
-- No memory (plain LeWM)
+- No memory (plain LeWorldModel)
 - Frame stacking (last k latents)
-- Recurrent state in the predictor (the learned-memory competitor, as in Dreamer-style models)
+- Recurrent state in the predictor
+- Sparsely updating recurrent state (GateL0RD style)
+- Always-on learned slots (MemWM style)
 - Full history (all past latents, attention)
-- Compact memory with fixed-interval writes, same K
-- Compact memory with random writes, same K
-- Oracle memory (ground-truth task state), as an upper bound
+- Oracle memory (ground-truth hidden state), as an upper bound
 
 ### 5.3 Metrics
 
-- Task success rate (mean and spread over `[TBD: seeds, at least 3]` seeds)
-- Planning latency per decision (ms) and rate (Hz), on stated hardware
+- Task success rate, with confidence intervals
+- Planning time per decision (ms) and rate (Hz), on stated hardware, across episode lengths
 - Memory footprint (slots, bytes) and writes per episode
-- **Surprise audit:** for each event type, how often surprise fires on labelled important moments (recall) and how often it fires on unimportant ones (false-alarm rate)
-- Recovery after perturbation (T3)
+- **Signal audit:** for each signal and each event type, how often it fires on labelled important moments (recall) and on unimportant ones (false-alarm rate)
 
-### 5.4 Ablations
+### 5.4 Controls and evidence
+
+- **Appearance controls in the audit:** recolouring, repeated frames and wrong actions, following Hristov et al., to see what actually moves each signal.
+- **Counterfactual memory check:** hold the present state identical, swap the memory contents, and test whether the planner chooses the branch the memory warrants, following Zhang et al. A memory that changes behaviour without guiding it does not count.
+- **Episode-length sweep:** the speed claim (H2) is tested where it could matter, at hundreds to thousands of steps `[TBD: range]`.
+- **Statistics:** 5 seeds; enough evaluation episodes per condition to resolve a 10-point difference in success rate (about 400) `[TBD: final numbers]`; intervals reported for every headline number.
+- **Reproducibility:** hypotheses in this file are tagged in git before any result exists; every table and figure is regenerated from logged runs by one command; code, configs and logs are released with the preprint.
+
+### 5.5 Ablations
 
 - Memory size K
-- Threshold and habituation settings
-- Surprise signal: own action-conditioned prediction error vs Gaussian-surrogate surprise (Gorlo et al. style)
-- Read mechanism: attention in predictor vs memory used only in the cost function
+- Thresholds for each signal
+- How plan change is measured (actions vs cost)
+- Where memory is read (in the predictor vs only in the cost)
 
 ---
 
-## 6. Compute and hardware
+## 6. Demos
 
-- **Simulation:** the LeWM environments `[TBD: confirm the simulator behind each environment from the LeWM repo]`.
-- **Code and checkpoints:** LeWM's paper links public code `[TBD: confirm whether pretrained checkpoints and datasets are released, in Step 01]`.
-- **GPU:** rented cloud GPU, budget not a constraint. LeWM reports training on a single GPU in a few hours `[TBD: confirm once Step 01 reproduction is timed]`.
-- **Real-robot demo (early 2027):** arm not yet chosen `[TBD]`. Requirements: a wrist or overhead camera, good repeatability (the world model must predict where the arm actually goes), and an open software stack. Candidates: SO-101 (lowest cost), Koch v1.1 (Dynamixel servos, more precise, higher cost).
-
----
-
-## 7. The Lab: six steps to the paper (target: preprint by end of December 2026)
-
-Each step is one entry on the website's Lab page. Status values match the site: `building` (in progress), `next` (up next), `planned`, `shipped` (done and written up). The first two steps are deliberately about checking assumptions, not building the memory system: if either assumption fails, we want to know in the first two weeks.
-
-| Step | Title | Dates | Goal | Done when | Status |
-|---|---|---|---|---|---|
-| 01 | The Baseline | Oct 28 to Nov 3 | Literature comparison finalized; reproduce one LeWM task end to end | Success rate and planning time per decision measured on our hardware | building |
-| 02 | The Surprise Audit | Nov 4 to 10 | No memory yet. Log the trained model's prediction error on T1 and T3 (plus T2, T4 if time) against hand-labelled important moments | **Checkpoint 1 (go/no-go):** recall and false-alarm rate per event type. Does surprise still fire for the cue after training? | next |
-| 03 | Tasks That Need Memory | Nov 11 to 17 | Finalize T1 and T3; run memoryless LeWM and the oracle | **Checkpoint 2:** memoryless fails, oracle succeeds (H1). If not, redesign tasks | planned |
-| 04 | Remembering Everything | Nov 18 to 24 | Baselines: frame stack, recurrent state, full history | Baseline table filled | planned |
-| 05 | The Surprise Gate | Nov 25 to Dec 8 | Compact memory with surprise, fixed and random writes at the same K; progress trigger only if Step 02 calls for it | **Checkpoint 3:** H2 (efficiency) and H3 (selection) answered separately | planned |
-| 06 | The Price of Memory | Dec 9 to 15 | Full runs over seeds; success vs planning time for every variant; ablations | Main results table, trade-off plot, ablation table | planned |
-| Paper | Keepsake | Dec 16 to 29 | Write, make figures, internal review, release code, submit to arXiv | Preprint live | planned |
-
-After the paper: the same planner and memory on a real arm with a camera (early 2027).
+1. **Diagnostic, in simulation:** the memoryless planner beside Notch on the same episode, with the live signal traces and memory slots overlaid from the real model.
+2. **Manipulation, in simulation:** a MIKASA-Robo shell game with a simulated arm, same overlay.
+3. **Real arm:** the shell game on a physical arm with a camera `[TBD: arm]`. Planning with a world model on a real arm needs teleoperated data; the fallback is to run the Signal Audit on real footage.
 
 ---
 
-## 8. Risks and fallbacks
+## 7. Code, compute and hardware
+
+- **Base code:** LeWorldModel (`lucas-maes/le-wm`), MIT licence, PyTorch, built on `stable-worldmodel`. Environments: two-room, pusht, cube, reacher. Datasets and pretrained checkpoints are on Hugging Face (`quentinll/lewm-*`).
+- **Model size:** about 15M parameters per the paper's abstract `[TBD: confirm; another paper's table lists 18M]`.
+- **GPU:** rented cloud GPU. LeWorldModel reports training on a single GPU in a few hours `[TBD: confirm once Step 01 is timed]`.
+- **Benchmark:** MIKASA-Robo, MIT licence, built on ManiSkill3, with released expert trajectories.
+
+---
+
+## 8. The Lab: six steps to the paper
+
+Each step is one entry on the website's Lab page, and each is broken into parts that are done one at a time. Status values match the site: `building`, `next`, `planned`, `shipped`. The first three steps check assumptions before any memory system is built: the base model works, the tasks really need memory, and the write signals mark the moments that matter.
+
+| Step | Title | Question | Done when | Status |
+|---|---|---|---|---|
+| 01 | The Baseline | Does LeWorldModel work for us, and can its planner tell us when its plan changes? | Success rate and planning time per decision measured on our hardware; the `[TBD]`s in Sections 4, 5.1 and 7 resolved | building |
+| 02 | Tasks That Need Memory | Do our tasks really need memory? | Memoryless planner fails and oracle succeeds (H1), on the diagnostic task and at least one benchmark task | next |
+| 03 | The Signal Audit | Before building memory: which signal marks the moments worth remembering? | **Go/no-go:** recall and false-alarm rate per signal and event type, with the plan-change noise floor known | planned |
+| 04 | Remembering Everything | What do the expensive memories achieve, and at what price? | Memory-reading predictor trained; baseline table filled | planned |
+| 05 | The Write Rule | With the same model and the same budget, which write rule fills a small memory best, and does the memory guide the plan? | H3 and H4 answered separately; counterfactual check passed or reported | planned |
+| 06 | The Price of Memory | How do reliability and planning time trade off as episodes get longer? | Main results table, trade-off plot (H2), ablation table | planned |
+| Paper | Notch | | Preprint live, with code, logs and both simulation demos | planned |
+
+### Parts of each step
+
+**01 The Baseline**
+1. Read the LeWorldModel paper; write a reading note in `notes/`.
+2. Set up the environment on a cloud GPU; download the Two-Room dataset and checkpoint.
+3. Evaluate the pretrained checkpoint: success rate and planning time per decision.
+4. Retrain Two-Room from scratch and compare with the released checkpoint and the paper.
+5. Read the planner code: where the plan lives between steps, and whether the plans before and after a new observation can both be read out.
+6. Check whether MIKASA-Robo tasks fit goal-image planning and LeWorldModel's data format.
+
+**02 Tasks That Need Memory**
+1. Build the diagnostic task in Two-Room: information needed for the goal is visible only early in the episode. Log the ground-truth hidden state at every step.
+2. Generate training data for it and train LeWorldModel on it.
+3. Run the memoryless planner and the oracle (H1 on the diagnostic task).
+4. Port one MIKASA-Robo task (first choice: ShellGame) and repeat parts 2 and 3.
+5. Add distractor and appearance-only variants of the diagnostic task, for Step 03.
+
+**03 The Signal Audit**
+1. Log surprise and plan change at every step of planner rollouts.
+2. Measure the plan-change noise floor: replan many times from an identical state and see how much the plan moves by chance.
+3. Label moments by event type: outside change that matters, irrelevant novelty, appearance-only change, self-caused progress.
+4. Compute recall and false-alarm rate for each signal and event type.
+5. Run the appearance controls: recolouring, repeated frames, wrong actions.
+6. Decide: go or no-go, and whether a progress trigger is needed.
+
+**04 Remembering Everything**
+1. Extend the predictor to read K memory slots.
+2. Train it with slots filled by random subsets of earlier latents, so it can use whatever the memory holds; check that it does.
+3. Run the baselines: frame stacking, recurrent state, sparsely updating recurrent state, always-on learned slots, full history, oracle.
+
+**05 The Write Rule**
+1. Implement the five write rules: time, chance, surprise, plan change, surprise × plan change.
+2. Match budgets: every rule writes the same average number of times per episode.
+3. Evaluate all five on the same weights (H3, H4).
+4. Run the counterfactual memory check: identical present state, swapped memory, does the planner choose the branch the memory warrants?
+
+**06 The Price of Memory**
+1. Measure planning time per decision against episode length for every memory variant.
+2. Full runs: 5 seeds, enough episodes per condition for confidence intervals, on the diagnostic and benchmark tasks.
+3. Ablations: memory size K, thresholds, how plan change is measured, where memory is read.
+
+**Paper**
+1. Generate every table and figure from logged runs with one command.
+2. Record the two simulation demos from real runs: the diagnostic task and the shell game, memoryless planner beside Notch, with live signal traces and memory slots.
+3. Write; outside review; release code, configs and logs; arXiv.
+
+After the paper: the real-arm demo.
+
+---
+
+## 9. Risks and fallbacks
 
 | Risk | Fallback |
 |---|---|
-| Closest work (Gorlo et al., 2026) is very similar in spirit | Cite it prominently; our contribution is control plus speed plus action-conditioned surprise tested as a proxy. Re-check arXiv every 2 weeks for new overlaps |
-| Surprise misses the trained cue entirely (Step 02) | That is the limitation the paper addresses: analyse why, then test a progress or identity-based trigger |
-| Surprise fires on irrelevant novelty (noisy TV) | Measure the false-alarm rate (T4); test habituation and thresholds; report honestly |
-| World models plan reliably only over short horizons (Alrasheed et al., 2026) | Keep tasks short, or plan to subgoals |
-| Surprise gating does not beat fixed or random writes (H3 fails) | H2 can still hold on its own. Together with the event-type analysis, this is potentially a useful negative result, *if* the analysis explains why. Publication is not guaranteed by completeness |
-| Timeline slips | Keep T1, T3, control and H1 to H3; drop T2/T4 extensions and ablations first |
+| Plan change is noisy, because sampling-based planners give different plans from run to run | Compare plans under shared random numbers, or compare costs instead of actions; measure the noise floor in Step 03 before relying on the signal |
+| Neither signal marks the moments that matter (Step 03) | The audit itself is the result: a controlled account of where each signal fails. Test a progress trigger |
+| LeWorldModel does not train well on the benchmark tasks | Keep the diagnostic tasks in LeWorldModel's own environments as the core; report the benchmark attempt honestly |
+| No speed gap at realistic episode lengths | Report it. The selection results (H3, H4) stand on their own |
+| The field moves quickly | Re-check the literature at the start of every Lab step |
+| Scope grows | Core is the diagnostic task, one benchmark task, H1 to H4. Drop ablations and extra tasks first |
 
 ---
 
-## 9. Open decisions
+## 10. Open decisions
 
-- [ ] Base model: LeWM or Fast-LeWM
-- [ ] Final task list (after Step 02)
+- [ ] Exact measure of plan change (after Step 01)
+- [ ] Diagnostic task design and final benchmark tasks (after Steps 01 and 02)
 - [ ] Memory size K and eviction rule
-- [ ] Whether a progress trigger is needed (after Step 02)
-- [ ] GPU provider
+- [ ] Whether a progress trigger is needed (after Step 03)
 - [ ] Robot arm for the demo
-- [ ] Venue after arXiv (workshop or conference) `[TBD]`
+- [ ] Venue after arXiv `[TBD]`
 
 ---
 
-## 10. Later directions (not in this paper)
+## 11. Later directions (not in this paper)
 
-- **Another body:** the same memory on a simulated drone or quadrotor, unchanged.
-- **Typed fast heads:** small heads that answer atomic questions in one pass ("is this subtask done?", "how confident am I?"), inspired by "System One" models such as TypeSafe's Jev.
-- **Cross-episode memory:** distilled lessons stored in a compact graph and retrieved only when surprised.
-- **Environmental memory:** the agent externalizes task state into the scene (see *Artifacts as Memory Beyond the Agent Boundary*, Martin et al., 2026).
-- **Swarm / leader-follower control** with learned world models.
+- **Another body:** the same memory on a simulated drone, unchanged.
+- **Cross-episode memory:** distilled lessons kept in a compact graph and recalled only when needed.
+- **Environmental memory:** the agent leaves itself traces in the scene (see *Artifacts as Memory Beyond the Agent Boundary*, Martin et al., 2026).
+- **Leader-follower control** of several robots through a learned world model.
 
 ---
 
-## 11. Repository layout (planned)
+## 12. Repository layout (planned)
 
 ```
-surprise-memory-wm/
+notch/
 ├── README.md        this file
 ├── notes/           one reading note per paper
 ├── envs/            memory-requiring task variants
-├── src/             memory module, surprise gate, planner glue
+├── src/             memory module, write rules, planner glue
 ├── experiments/     configs and run scripts
 ├── results/         logs, tables, figures
 └── paper/           LaTeX draft
@@ -216,16 +281,19 @@ surprise-memory-wm/
 
 ---
 
-## 12. References
+## 13. References
 
-1. Torne, Pertsch, et al. *MEM: Multi-Scale Embodied Memory for Vision Language Action Models.* 2026. https://arxiv.org/abs/2603.03596
-2. Gorlo, Wise, Speranzon, Carlone. *Worth Remembering: Surprise-Gated Robot Episodic Memory.* 2026. https://arxiv.org/abs/2606.03787
-3. Zheng et al. *Mem-World: Memory-Augmented Action-Conditioned World Models for Persistent Robot Manipulation.* 2026. https://arxiv.org/abs/2606.18960
-4. Fan, Zhang, Han. *Event-Centric World Modeling with Memory-Augmented Retrieval for Embodied Decision-Making.* 2026. https://arxiv.org/abs/2604.07392
-5. Wang et al. *EV-WM: Event-Verified World Models for Long-Horizon Robotic Manipulation.* 2026. https://arxiv.org/abs/2606.13053
-6. Maes, Le Lidec, Scieur, LeCun, Balestriero. *LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels.* 2026. https://arxiv.org/abs/2603.19312
-7. Gao, Xu. *Fast LeWorldModel.* 2026. https://arxiv.org/abs/2606.26217 (code: https://github.com/Yuntian-Gao/Fast-LeWorldModel)
-8. Alrasheed, Azam, Akhtar. *The Planning Limits of Latent World Models.* 2026. https://arxiv.org/abs/2609.39235
-9. Martin et al. *Artifacts as Memory Beyond the Agent Boundary.* 2026. https://arxiv.org/abs/2604.08756
-10. Finn, C. Talk on the state of physical intelligence, Y Combinator, 2026 (transcript in project notes).
-11. TypeSafe AI. *Jev introduction.* https://docs.typesafe.ai/introduction
+1. Maes, Le Lidec, Scieur, LeCun, Balestriero. *LeWorldModel: Stable End-to-End Joint-Embedding Predictive Architecture from Pixels.* 2026. https://arxiv.org/abs/2603.19312 (code: https://github.com/lucas-maes/le-wm)
+2. Torne, Pertsch, et al. *MEM: Multi-Scale Embodied Memory for Vision Language Action Models.* 2026. https://arxiv.org/abs/2603.03596
+3. Gorlo, Wise, Speranzon, Carlone. *Worth Remembering: Surprise-Gated Robot Episodic Memory.* 2026. https://arxiv.org/abs/2606.03787
+4. Chen. *AURA: Action-Gated Memory for Robot Policies at Constant VRAM.* 2026. https://arxiv.org/abs/2606.02775
+5. Gao, Liu, Li, Song. *Gated Memory Policy: In-Context Memorization and Adaptation.* 2026. https://arxiv.org/abs/2604.18933
+6. Sun, Zhu. *Enhancing Latent World Models with Associative Memory (MemWM).* 2026. https://arxiv.org/abs/2610.19683
+7. Zeng et al. *MemoWM: How World Models Change What Agents Need to Remember.* 2026. https://arxiv.org/abs/2610.10778
+8. Sun et al. *HiMem-WAM: Hierarchical Memory-Gated World Action Models for Robotic Manipulation.* 2026. https://arxiv.org/abs/2606.10363
+9. Zhao et al. *Memory as Plans: World-Action Modeling with Memory-Grounded Planning.* 2026. https://arxiv.org/abs/2609.11561
+10. Hristov, Slavov, Vasilev. *When Does Latent Prediction Error Support Physical Surprise Claims in Video World Models?* 2026. https://arxiv.org/abs/2611.01815
+11. Zhang, Xiang, Chen. *Memory That Changes Action Is Not Memory That Guides It: Counterfactual Auditing of History-Conditioned Robot Policies.* 2026. https://arxiv.org/abs/2609.27247
+12. Gumbsch, Butz, Martius. *Sparsely Changing Latent States for Prediction and Planning in Partially Observable Domains.* 2021. https://arxiv.org/abs/2110.15949
+13. Cherepanov, Kachaev, Kovalev, Panov. *Memory, Benchmark & Robots: A Benchmark for Solving Complex Tasks with Reinforcement Learning (MIKASA).* https://arxiv.org/abs/2502.10550
+14. Martin et al. *Artifacts as Memory Beyond the Agent Boundary.* 2026. https://arxiv.org/abs/2604.08756
